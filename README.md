@@ -1,4 +1,4 @@
-<h1 align="center">Fullscreen Window Selection</h1>
+<h1 align="center">OBS Selective Fullscreen</h1>
 
 <p align="center">
   <b>An OBS Studio source for Windows that captures a whole monitor — but only shows the apps you choose.</b><br>
@@ -9,7 +9,7 @@
 
 ## What it does
 
-**Fullscreen Window Selection** adds a new capture source whose canvas is exactly the size of one of your monitors. Instead of showing the whole desktop, it composites **only the windows belonging to applications you select** (by executable name, e.g. `notepad.exe`) — at their real on-screen positions, with their real z-order, moving and resizing live exactly as they do on your desktop. Every pixel not covered by a selected window is fully transparent.
+**OBS Selective Fullscreen** adds a new capture source whose canvas is exactly the size of one of your monitors. Instead of showing the whole desktop, it composites **only the windows belonging to applications you select** (by executable name, e.g. `notepad.exe`) — at their real on-screen positions, with their real z-order, moving and resizing live exactly as they do on your desktop. Every pixel not covered by a selected window is fully transparent.
 
 ```
         Your desktop                      This source's output
@@ -58,22 +58,22 @@ Copy the plugin into OBS's plugin search path and restart OBS:
 
 ```
 C:\ProgramData\obs-studio\plugins\
-└── obs-fullscreen-windowselection\
-    ├── bin\64bit\obs-fullscreen-windowselection.dll
+└── obs-selective-fullscreen\
+    ├── bin\64bit\obs-selective-fullscreen.dll
     └── data\locale\en-US.ini
 ```
 
-(Alternatively, drop the DLL into `obs-plugins\64bit\` and the locale file into `data\obs-plugins\obs-fullscreen-windowselection\locale\` inside your OBS installation folder.)
+(Alternatively, drop the DLL into `obs-plugins\64bit\` and the locale file into `data\obs-plugins\obs-selective-fullscreen\locale\` inside your OBS installation folder.)
 
 Verify it loaded via **Help → Log Files → View Current Log** — you should see:
 
 ```
-[obs-fullscreen-windowselection] plugin loaded successfully (version 0.1.0)
+[obs-selective-fullscreen] plugin loaded successfully (version 0.1.0)
 ```
 
 ## Usage & configuration
 
-Add **Sources → + → Fullscreen Window Selection**, then configure:
+Add **Sources → + → Selective Fullscreen**, then configure:
 
 | Option | Default | Description |
 |---|---|---|
@@ -104,8 +104,8 @@ The plugin itself links only Windows system libraries on top of libobs: `d3d11`,
 ### Build steps
 
 ```powershell
-git clone <this-repo>
-cd obs-fullscreen-windowselection
+git clone https://github.com/bogenpirat/obs-selective-fullscreen.git
+cd obs-selective-fullscreen
 
 cmake --preset windows-x64          # first run downloads deps + builds libobs (a few minutes)
 cmake --build --preset windows-x64  # RelWithDebInfo by default

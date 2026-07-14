@@ -33,13 +33,13 @@
     },
     "platformConfig": {
         "macos": {
-            "bundleId": "com.julian.obs-fullscreen-windowselection"
+            "bundleId": "com.julian.obs-selective-fullscreen"
         }
     },
-    "name": "obs-fullscreen-windowselection",
-    "displayName": "Fullscreen Window Selection",
+    "name": "obs-selective-fullscreen",
+    "displayName": "OBS Selective Fullscreen",
     "version": "0.1.0",
     "author": "Julian",
-    "website": "https://example.com",
+    "website": "https://github.com/bogenpirat/obs-selective-fullscreen",
     "email": "juliii@gmail.com"
 }

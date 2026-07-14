@@ -1,5 +1,5 @@
 /*
-obs-fullscreen-windowselection
+obs-selective-fullscreen
 Copyright (C) 2026 Julian <juliii@gmail.com>
 
 This program is free software; you can redistribute it and/or modify
@@ -387,7 +387,7 @@ obs_properties_t *pcc_get_properties(void *)
 void register_composite_source()
 {
 	obs_source_info info = {};
-	info.id = "fullscreen_window_selection";
+	info.id = "selective_fullscreen";
 	info.type = OBS_SOURCE_TYPE_INPUT;
 	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_DO_NOT_DUPLICATE | OBS_SOURCE_SRGB;
 	info.get_name = pcc_get_name;
