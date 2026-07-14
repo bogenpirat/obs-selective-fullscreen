@@ -27,8 +27,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 struct TrackedWindow {
 	HWND hwnd = nullptr;
-	RECT window_rect{};  /* GetWindowRect; includes invisible resize borders */
-	RECT visible_rect{}; /* DWMWA_EXTENDED_FRAME_BOUNDS; what the user sees */
+	RECT window_rect{};    /* GetWindowRect; includes invisible resize borders */
+	RECT visible_rect{};   /* DWMWA_EXTENDED_FRAME_BOUNDS; what the user sees */
 	bool drawable = false; /* not minimized/cloaked and intersects the target monitor */
 };
 

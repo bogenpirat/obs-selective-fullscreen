@@ -113,8 +113,7 @@ bool borderless_capture_granted()
 				return;
 
 			const auto status =
-				GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
-					.get();
+				GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless).get();
 			granted = status == AppCapabilityAccessStatus::Allowed;
 		} catch (...) {
 			granted = false;
@@ -168,7 +167,8 @@ struct WgcWindowCapture::Impl : std::enable_shared_from_this<WgcWindowCapture::I
 			return;
 
 		winrt::com_ptr<ID3D11Texture2D> source;
-		auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+		auto access =
+			frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
 		if (FAILED(access->GetInterface(winrt::guid_of<ID3D11Texture2D>(), source.put_void())))
 			return;
 

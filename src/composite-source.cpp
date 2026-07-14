@@ -198,8 +198,7 @@ void pcc_tick(void *data, float seconds)
 		if (capture->valid()) {
 			s->captures.emplace(window.hwnd, std::move(capture));
 		} else {
-			obs_log(LOG_INFO, "Could not start WGC capture for window %p (elevated process?)",
-				window.hwnd);
+			obs_log(LOG_INFO, "Could not start WGC capture for window %p (elevated process?)", window.hwnd);
 			s->failed_windows[window.hwnd] = now + CREATE_RETRY_MS;
 		}
 	}
@@ -390,8 +389,7 @@ void register_composite_source()
 	obs_source_info info = {};
 	info.id = "fullscreen_window_selection";
 	info.type = OBS_SOURCE_TYPE_INPUT;
-	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_DO_NOT_DUPLICATE |
-			    OBS_SOURCE_SRGB;
+	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_DO_NOT_DUPLICATE | OBS_SOURCE_SRGB;
 	info.get_name = pcc_get_name;
 	info.create = pcc_create;
 	info.destroy = pcc_destroy;
