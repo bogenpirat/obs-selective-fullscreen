@@ -30,10 +30,12 @@ Each selected window is captured **individually** with [`Windows.Graphics.Captur
 
 - 🖥️ **Monitor-sized canvas** with a fully transparent background (real alpha channel)
 - 🎯 **Select apps, not windows** — every window of a selected process is captured, including ones the app opens later; closed windows disappear automatically
+- 🔎 **Optional window-title filter** per entry (`chrome.exe|My Stream`) — capture just the one browser window you mean, not all of them
 - 🪟 **Faithful desktop behavior** — position, size, movement, and stacking order mirror your desktop 1:1, pixel-exact (invisible resize borders are cropped away)
 - 🖱️ **Cursor capture** that only appears while the cursor is over a selected window
 - 🟡 **No yellow capture border** on Windows 11
 - 🧊 Windows spanning multiple monitors are clipped cleanly at the canvas edge
+- ⏸️ **Zero cost while hidden** — capture sessions and window scanning shut down automatically when the source isn't visible in any scene, preview, or projector
 
 ## Compatibility
 
@@ -78,10 +80,11 @@ Add **Sources → + → Selective Fullscreen**, then configure:
 | Option | Default | Description |
 |---|---|---|
 | **Monitor** | Primary | The display to mirror. The source's dimensions are exactly this monitor's resolution, and only windows intersecting it are drawn. Monitors are identified by stable device IDs, so the selection survives display re-arrangement. |
-| **Applications** | *(empty)* | Editable list of executable names, one per entry (e.g. `notepad.exe`). Matching is case-insensitive. Entries persist even while the app isn't running — its windows appear the moment it starts. |
+| **Applications** | *(empty)* | Editable list of executable names, one per entry (e.g. `notepad.exe`). Matching is case-insensitive. Entries persist even while the app isn't running — its windows appear the moment it starts. Append `\|text` to an entry to only capture windows whose **title** contains the text (case-insensitive), e.g. `chrome.exe\|My Stream` — handy for picking one browser window out of many. |
 | **Add running application** | — | Convenience dropdown listing every executable that currently owns a visible window; picking one appends it to the list above. |
 | **Match full executable path** | Off | When enabled, entries must be full paths (`C:\Tools\MyApp\app.exe`) instead of file names — useful to distinguish two programs with the same executable name. Entries containing `\` are always compared as full paths. |
 | **Capture cursor** | On | Includes the mouse cursor while it hovers a selected window. |
+| **Pause capture while the source is hidden** | On | Shuts down all capture sessions and window scanning while the source isn't shown anywhere (any scene, studio-mode preview, or projector counts as shown), freeing GPU/CPU. Re-showing restarts captures within a frame or two — turn this off if you hard-cut between scenes and the brief re-capture blank bothers you. |
 
 **Tip:** to check the transparency, place a Color Source behind this source in your scene — every area not covered by a selected window should show it.
 
@@ -141,7 +144,7 @@ The GitHub Actions workflows inherited from obs-plugintemplate build and package
 
 ## How it works
 
-1. A lightweight tracker enumerates top-level windows every frame (`EnumWindows`, which yields z-order), resolves their owning process image (`QueryFullProcessImageNameW`, cached), and keeps the set matching your selection.
+1. A lightweight tracker enumerates top-level windows every frame (`EnumWindows`, which yields z-order), resolves their owning process image (`QueryFullProcessImageNameW`, cached), and keeps the set matching your selection — including any per-entry title filter. A window whose title stops matching (e.g. a browser tab switch) vanishes from the canvas immediately, but its capture session is kept warm for a few seconds so it reappears instantly if the title switches back. All of this idles completely while the source isn't visible anywhere (see the pause option).
 2. Each matched window gets its own `Windows.Graphics.Capture` session on OBS's D3D11 device; frames are copied straight into OBS textures — windows are captured whole even when occluded or moved off-screen.
 3. On render, the textures are drawn bottom-to-top at each window's DWM frame position (`DWMWA_EXTENDED_FRAME_BOUNDS`), premultiplied-alpha-blended onto the transparent monitor-sized canvas, cropped by the invisible resize borders and clipped to the monitor.
 
