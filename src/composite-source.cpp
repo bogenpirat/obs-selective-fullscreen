@@ -428,8 +428,9 @@ obs_properties_t *pcc_get_properties(void *)
 		obs_property_list_add_string(monitor_list, name.c_str(), id.c_str());
 	}
 
-	obs_property_t *process_list = obs_properties_add_editable_list(
-		props, "process_list", obs_module_text("ProcessList"), OBS_EDITABLE_LIST_TYPE_STRINGS, nullptr, nullptr);
+	obs_property_t *process_list =
+		obs_properties_add_editable_list(props, "process_list", obs_module_text("ProcessList"),
+						 OBS_EDITABLE_LIST_TYPE_STRINGS, nullptr, nullptr);
 	obs_property_set_long_description(process_list, obs_module_text("ProcessList.Tooltip"));
 
 	obs_property_t *add_process = obs_properties_add_list(props, "add_process", obs_module_text("AddProcess"),
