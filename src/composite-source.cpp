@@ -36,6 +36,9 @@ namespace {
 constexpr size_t MAX_CAPTURES = 32;
 constexpr uint64_t CREATE_RETRY_MS = 5000;
 constexpr float MONITOR_RECHECK_SECONDS = 1.0f;
+/* Keep a capture alive this long after its window's title stops matching, so
+ * transient title changes (browser tab switches) don't restart the session. */
+constexpr uint64_t TITLE_LINGER_MS = 3000;
 
 std::wstring utf8_to_wide(const char *utf8)
 {
@@ -67,9 +70,10 @@ std::string wide_to_utf8(const std::wstring &wide)
 
 struct SourceSettings {
 	std::wstring monitor_id;
-	std::vector<std::wstring> exe_names;
+	std::vector<FilterRule> rules;
 	bool match_full_path = false;
 	bool cursor = true;
+	bool pause_when_hidden = true;
 };
 
 struct CompositeSource {
@@ -86,9 +90,13 @@ struct CompositeSource {
 	std::atomic<uint32_t> width{0};
 	std::atomic<uint32_t> height{0};
 
+	/* Flipped from show/hide callbacks (any thread); read in tick. */
+	std::atomic<bool> showing{false};
+
 	std::map<HWND, std::unique_ptr<WgcWindowCapture>> captures;
-	std::map<HWND, uint64_t> failed_windows; /* hwnd -> earliest retry (ms) */
-	std::vector<TrackedWindow> draw_list;    /* bottom-to-top */
+	std::map<HWND, uint64_t> failed_windows;     /* hwnd -> earliest retry (ms) */
+	std::map<HWND, uint64_t> title_last_matched; /* hwnd -> last title match (ms) */
+	std::vector<TrackedWindow> draw_list;        /* bottom-to-top */
 };
 
 void pcc_update(void *data, obs_data_t *settings)
@@ -99,16 +107,35 @@ void pcc_update(void *data, obs_data_t *settings)
 	parsed.monitor_id = utf8_to_wide(obs_data_get_string(settings, "monitor"));
 	parsed.match_full_path = obs_data_get_bool(settings, "match_full_path");
 	parsed.cursor = obs_data_get_bool(settings, "cursor");
+	parsed.pause_when_hidden = obs_data_get_bool(settings, "pause_when_hidden");
 
 	obs_data_array_t *list = obs_data_get_array(settings, "process_list");
 	if (list) {
 		const size_t count = obs_data_array_count(list);
 		for (size_t i = 0; i < count; i++) {
 			obs_data_t *item = obs_data_array_item(list, i);
-			std::wstring name = utf8_to_wide(obs_data_get_string(item, "value"));
+			std::wstring value = utf8_to_wide(obs_data_get_string(item, "value"));
 			obs_data_release(item);
-			if (!name.empty())
-				parsed.exe_names.push_back(std::move(name));
+
+			/* Optional "exe|title-substring" syntax; '|' is illegal in
+			 * Windows paths, so splitting on the first one is safe. */
+			const auto trim = [](std::wstring text) {
+				const size_t begin = text.find_first_not_of(L" \t");
+				const size_t end = text.find_last_not_of(L" \t");
+				return begin == std::wstring::npos ? std::wstring()
+								   : text.substr(begin, end - begin + 1);
+			};
+
+			FilterRule rule;
+			const size_t separator = value.find(L'|');
+			if (separator == std::wstring::npos) {
+				rule.exe = std::move(value);
+			} else {
+				rule.exe = trim(value.substr(0, separator));
+				rule.title = trim(value.substr(separator + 1));
+			}
+			if (!rule.exe.empty())
+				parsed.rules.push_back(std::move(rule));
 		}
 		obs_data_array_release(list);
 	}
@@ -132,7 +159,7 @@ void pcc_tick(void *data, float seconds)
 	}
 
 	if (changed) {
-		s->tracker.set_filter(settings.exe_names, settings.match_full_path);
+		s->tracker.set_filter(settings.rules, settings.match_full_path);
 		for (auto &entry : s->captures)
 			entry.second->set_cursor_enabled(settings.cursor);
 	}
@@ -150,25 +177,38 @@ void pcc_tick(void *data, float seconds)
 		}
 	}
 
-	if (!s->monitor_valid || settings.exe_names.empty()) {
+	const bool paused = settings.pause_when_hidden && !s->showing;
+	if (!s->monitor_valid || settings.rules.empty() || paused) {
 		s->draw_list.clear();
-		s->captures.clear();
+		s->captures.clear(); /* closes the WGC sessions */
 		s->failed_windows.clear();
+		s->title_last_matched.clear();
 		return;
 	}
 
 	std::vector<TrackedWindow> windows = s->tracker.scan(s->monitor.rect);
 	const uint64_t now = GetTickCount64();
 
-	/* Drop captures for windows that vanished or whose item closed. */
+	for (const TrackedWindow &window : windows) {
+		if (window.title_matched)
+			s->title_last_matched[window.hwnd] = now;
+	}
+
+	/* Drop captures for windows that vanished, whose item closed, or whose
+	 * title stopped matching longer than the linger period ago. */
 	for (auto it = s->captures.begin(); it != s->captures.end();) {
 		const HWND hwnd = it->first;
-		const bool still_matched = std::any_of(windows.begin(), windows.end(),
-						       [hwnd](const TrackedWindow &w) { return w.hwnd == hwnd; });
-		if (!still_matched || it->second->closed())
-			it = s->captures.erase(it);
-		else
+		const auto tracked = std::find_if(windows.begin(), windows.end(),
+						  [hwnd](const TrackedWindow &w) { return w.hwnd == hwnd; });
+		bool keep = tracked != windows.end() && !it->second->closed();
+		if (keep && !tracked->title_matched) {
+			const auto matched = s->title_last_matched.find(hwnd);
+			keep = matched != s->title_last_matched.end() && now - matched->second <= TITLE_LINGER_MS;
+		}
+		if (keep)
 			++it;
+		else
+			it = s->captures.erase(it);
 	}
 	for (auto it = s->failed_windows.begin(); it != s->failed_windows.end();) {
 		const HWND hwnd = it->first;
@@ -179,11 +219,22 @@ void pcc_tick(void *data, float seconds)
 		else
 			++it;
 	}
+	for (auto it = s->title_last_matched.begin(); it != s->title_last_matched.end();) {
+		const HWND hwnd = it->first;
+		const bool still_tracked = std::any_of(windows.begin(), windows.end(),
+						       [hwnd](const TrackedWindow &w) { return w.hwnd == hwnd; });
+		if (!still_tracked)
+			it = s->title_last_matched.erase(it);
+		else
+			++it;
+	}
 
 	/* Start captures for newly matched windows. */
 	for (const TrackedWindow &window : windows) {
 		if (s->captures.size() >= MAX_CAPTURES)
 			break;
+		if (!window.title_matched)
+			continue;
 		if (s->captures.count(window.hwnd))
 			continue;
 
@@ -226,7 +277,7 @@ void pcc_render(void *data, gs_effect_t *)
 	gs_blend_function(GS_BLEND_ONE, GS_BLEND_INVSRCALPHA);
 
 	for (const TrackedWindow &window : s->draw_list) {
-		if (!window.drawable)
+		if (!window.drawable || !window.title_matched)
 			continue;
 
 		auto it = s->captures.find(window.hwnd);
@@ -303,6 +354,18 @@ void pcc_destroy(void *data)
 	delete static_cast<CompositeSource *>(data);
 }
 
+/* show/hide may fire from the UI thread; captures are only touched in tick,
+ * so these just flip the flag. */
+void pcc_show(void *data)
+{
+	static_cast<CompositeSource *>(data)->showing = true;
+}
+
+void pcc_hide(void *data)
+{
+	static_cast<CompositeSource *>(data)->showing = false;
+}
+
 uint32_t pcc_get_width(void *data)
 {
 	return static_cast<CompositeSource *>(data)->width;
@@ -317,6 +380,7 @@ void pcc_get_defaults(obs_data_t *settings)
 {
 	obs_data_set_default_bool(settings, "cursor", true);
 	obs_data_set_default_bool(settings, "match_full_path", false);
+	obs_data_set_default_bool(settings, "pause_when_hidden", true);
 	obs_data_set_default_string(settings, "monitor", "");
 }
 
@@ -364,8 +428,9 @@ obs_properties_t *pcc_get_properties(void *)
 		obs_property_list_add_string(monitor_list, name.c_str(), id.c_str());
 	}
 
-	obs_properties_add_editable_list(props, "process_list", obs_module_text("ProcessList"),
-					 OBS_EDITABLE_LIST_TYPE_STRINGS, nullptr, nullptr);
+	obs_property_t *process_list = obs_properties_add_editable_list(
+		props, "process_list", obs_module_text("ProcessList"), OBS_EDITABLE_LIST_TYPE_STRINGS, nullptr, nullptr);
+	obs_property_set_long_description(process_list, obs_module_text("ProcessList.Tooltip"));
 
 	obs_property_t *add_process = obs_properties_add_list(props, "add_process", obs_module_text("AddProcess"),
 							      OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
@@ -378,6 +443,7 @@ obs_properties_t *pcc_get_properties(void *)
 
 	obs_properties_add_bool(props, "match_full_path", obs_module_text("MatchFullPath"));
 	obs_properties_add_bool(props, "cursor", obs_module_text("CaptureCursor"));
+	obs_properties_add_bool(props, "pause_when_hidden", obs_module_text("PauseWhenHidden"));
 
 	return props;
 }
@@ -398,6 +464,8 @@ void register_composite_source()
 	info.get_properties = pcc_get_properties;
 	info.video_tick = pcc_tick;
 	info.video_render = pcc_render;
+	info.show = pcc_show;
+	info.hide = pcc_hide;
 	info.get_width = pcc_get_width;
 	info.get_height = pcc_get_height;
 	info.icon_type = OBS_ICON_TYPE_DESKTOP_CAPTURE;

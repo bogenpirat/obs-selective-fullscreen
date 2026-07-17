@@ -27,9 +27,17 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 struct TrackedWindow {
 	HWND hwnd = nullptr;
-	RECT window_rect{};    /* GetWindowRect; includes invisible resize borders */
-	RECT visible_rect{};   /* DWMWA_EXTENDED_FRAME_BOUNDS; what the user sees */
-	bool drawable = false; /* not minimized/cloaked and intersects the target monitor */
+	RECT window_rect{};        /* GetWindowRect; includes invisible resize borders */
+	RECT visible_rect{};       /* DWMWA_EXTENDED_FRAME_BOUNDS; what the user sees */
+	bool drawable = false;     /* not minimized/cloaked and intersects the target monitor */
+	bool title_matched = true; /* window title satisfies at least one matching rule */
+};
+
+/* One entry of the user's application list: an executable name or full path,
+ * optionally restricted to windows whose title contains a substring. */
+struct FilterRule {
+	std::wstring exe;   /* lower-case exe name or full path */
+	std::wstring title; /* lower-case title substring; empty matches any title */
 };
 
 struct MonitorInfo {
@@ -41,11 +49,13 @@ struct MonitorInfo {
 
 class WindowTracker {
 public:
-	void set_filter(std::vector<std::wstring> exe_names, bool match_full_path);
+	void set_filter(std::vector<FilterRule> rules, bool match_full_path);
 
 	/* Matching top-level windows in bottom-to-top z-order. Windows that are
 	 * minimized/cloaked or off-monitor are included (so captures survive)
-	 * but flagged as not drawable. */
+	 * but flagged as not drawable. Windows whose exe matches but whose title
+	 * does not are included with title_matched=false so the caller can keep
+	 * their captures warm across transient title changes. */
 	std::vector<TrackedWindow> scan(const RECT &monitor_rect);
 
 private:
@@ -56,9 +66,9 @@ private:
 	};
 
 	const PidCacheEntry *executable_for_pid(DWORD pid);
-	bool matches(const PidCacheEntry &entry) const;
+	bool matches(const PidCacheEntry &entry, HWND hwnd, bool &title_matched) const;
 
-	std::vector<std::wstring> exe_names_; /* lower-case */
+	std::vector<FilterRule> rules_;
 	bool match_full_path_ = false;
 	std::unordered_map<DWORD, PidCacheEntry> pid_cache_;
 };
