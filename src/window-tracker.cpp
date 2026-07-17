@@ -97,13 +97,14 @@ BOOL CALLBACK collect_windows(HWND hwnd, LPARAM param)
 
 } // namespace
 
-void WindowTracker::set_filter(std::vector<std::wstring> exe_names, bool match_full_path)
+void WindowTracker::set_filter(std::vector<FilterRule> rules, bool match_full_path)
 {
-	exe_names_.clear();
-	for (auto &name : exe_names) {
-		std::wstring lowered = to_lower(std::move(name));
-		if (!lowered.empty())
-			exe_names_.push_back(std::move(lowered));
+	rules_.clear();
+	for (auto &rule : rules) {
+		rule.exe = to_lower(std::move(rule.exe));
+		rule.title = to_lower(std::move(rule.title));
+		if (!rule.exe.empty())
+			rules_.push_back(std::move(rule));
 	}
 	match_full_path_ = match_full_path;
 }
@@ -132,29 +133,54 @@ const WindowTracker::PidCacheEntry *WindowTracker::executable_for_pid(DWORD pid)
 	return &result.first->second;
 }
 
-bool WindowTracker::matches(const PidCacheEntry &entry) const
+bool WindowTracker::matches(const PidCacheEntry &entry, HWND hwnd, bool &title_matched) const
 {
+	title_matched = false;
 	if (entry.path.empty())
 		return false;
 
-	for (const auto &name : exe_names_) {
-		/* Names containing a path separator always compare against the
+	bool exe_matched = false;
+	std::wstring window_title;
+	bool title_fetched = false;
+
+	for (const auto &rule : rules_) {
+		/* Entries containing a path separator always compare against the
 		 * full image path so pasted paths work in either mode. */
-		if (match_full_path_ || name.find(L'\\') != std::wstring::npos ||
-		    name.find(L'/') != std::wstring::npos) {
-			if (entry.path == name)
-				return true;
-		} else if (entry.basename == name) {
+		if (match_full_path_ || rule.exe.find(L'\\') != std::wstring::npos ||
+		    rule.exe.find(L'/') != std::wstring::npos) {
+			if (entry.path != rule.exe)
+				continue;
+		} else if (entry.basename != rule.exe) {
+			continue;
+		}
+
+		exe_matched = true;
+		if (rule.title.empty()) {
+			title_matched = true;
+			return true;
+		}
+
+		/* Fetch the title lazily; GetWindowTextW reads the cached caption
+		 * for cross-process windows, so this cannot block on the target. */
+		if (!title_fetched) {
+			wchar_t buffer[512];
+			const int length = GetWindowTextW(hwnd, buffer, 512);
+			window_title.assign(buffer, (size_t)std::max(length, 0));
+			window_title = to_lower(std::move(window_title));
+			title_fetched = true;
+		}
+		if (window_title.find(rule.title) != std::wstring::npos) {
+			title_matched = true;
 			return true;
 		}
 	}
-	return false;
+	return exe_matched;
 }
 
 std::vector<TrackedWindow> WindowTracker::scan(const RECT &monitor_rect)
 {
 	std::vector<TrackedWindow> result;
-	if (exe_names_.empty())
+	if (rules_.empty())
 		return result;
 
 	std::vector<HWND> hwnds;
@@ -171,11 +197,13 @@ std::vector<TrackedWindow> WindowTracker::scan(const RECT &monitor_rect)
 			continue;
 
 		const PidCacheEntry *entry = executable_for_pid(pid);
-		if (!entry || !matches(*entry))
+		bool title_matched = false;
+		if (!entry || !matches(*entry, hwnd, title_matched))
 			continue;
 
 		TrackedWindow window;
 		window.hwnd = hwnd;
+		window.title_matched = title_matched;
 		if (!GetWindowRect(hwnd, &window.window_rect))
 			continue;
 
