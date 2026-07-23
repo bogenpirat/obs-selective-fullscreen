@@ -38,7 +38,7 @@
     },
     "name": "obs-selective-fullscreen",
     "displayName": "OBS Selective Fullscreen",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "author": "Julian",
     "website": "https://github.com/bogenpirat/obs-selective-fullscreen",
     "email": "juliii@gmail.com"

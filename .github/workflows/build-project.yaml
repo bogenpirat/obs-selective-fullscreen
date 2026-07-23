@@ -84,6 +84,25 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      - name: Sync Version from Tag 🏷️
+        if: github.ref_type == 'tag'
+        run: |
+          # Sync Version from Tag 🏷️
+          # The tag is the source of truth for the release version: patch its
+          # numeric part into buildspec.json so cmake, packaging, and artifact
+          # names all pick it up. CMake's project(VERSION) only accepts X.Y.Z,
+          # so any v prefix or -beta/-rc suffix is dropped here.
+          $Tag = '${{ github.ref_name }}'
+          if ( $Tag -match '^v?(?<version>[0-9]+\.[0-9]+\.[0-9]+)' ) {
+            $Version = $Matches.version
+            $BuildSpec = Get-Content -Path buildspec.json -Raw | ConvertFrom-Json
+            $BuildSpec.version = $Version
+            $BuildSpec | ConvertTo-Json -Depth 8 | Set-Content -Path buildspec.json
+            Write-Output "Synced buildspec.json version to ${Version} from tag ${Tag}"
+          } else {
+            Write-Output "::notice::Tag ${Tag} does not start with a semantic version; keeping buildspec.json version"
+          }
+
       - name: Set Up Environment 🔧
         id: setup
         run: |
