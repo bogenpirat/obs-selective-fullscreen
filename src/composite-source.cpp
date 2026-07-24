@@ -551,8 +551,13 @@ obs_properties_t *pcc_get_properties(void *data)
 	obs_property_set_modified_callback(scaled, scaled_layout_modified);
 
 	obs_properties_add_bool(props, "shrink_oversized", obs_module_text("ShrinkOversized"));
-	obs_properties_add_int(props, "target_width", obs_module_text("TargetWidth"), 0, 16384, 1);
-	obs_properties_add_int(props, "target_height", obs_module_text("TargetHeight"), 0, 16384, 1);
+	obs_property_t *target_w = obs_properties_add_int(props, "target_width", obs_module_text("TargetWidth"), 0, 16384, 1);
+	obs_property_t *target_h =
+		obs_properties_add_int(props, "target_height", obs_module_text("TargetHeight"), 0, 16384, 1);
+	obs_property_int_set_suffix(target_w, " px");
+	obs_property_int_set_suffix(target_h, " px");
+	obs_property_set_long_description(target_w, obs_module_text("TargetSize.Tooltip"));
+	obs_property_set_long_description(target_h, obs_module_text("TargetSize.Tooltip"));
 
 	/* Match the sub-options' initial visibility to the saved setting. */
 	obs_property_set_visible(obs_properties_get(props, "shrink_oversized"), false);
