@@ -25,6 +25,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -74,6 +75,12 @@ struct SourceSettings {
 	bool match_full_path = false;
 	bool cursor = true;
 	bool pause_when_hidden = true;
+	/* Scaled-layout mode: report a smaller (canvas-sized) source and remap each
+	 * window's desktop position proportionally while keeping its pixel size. */
+	bool scaled_layout = false;
+	bool shrink_oversized = true; /* shrink windows larger than the target, else clip them */
+	int target_width = 0;         /* 0 = match the OBS base canvas */
+	int target_height = 0;        /* 0 = match the OBS base canvas */
 };
 
 struct CompositeSource {
@@ -89,6 +96,14 @@ struct CompositeSource {
 	float monitor_check_elapsed = MONITOR_RECHECK_SECONDS;
 	std::atomic<uint32_t> width{0};
 	std::atomic<uint32_t> height{0};
+
+	/* Written in tick, read in render (both on the OBS graphics thread, like
+	 * monitor/draw_list). In scaled mode these hold the target canvas size and
+	 * the render remaps into it; otherwise they equal the monitor size. */
+	bool scaled_layout = false;
+	bool shrink_oversized = true;
+	uint32_t target_w = 0;
+	uint32_t target_h = 0;
 
 	/* Flipped from show/hide callbacks (any thread); read in tick. */
 	std::atomic<bool> showing{false};
@@ -108,6 +123,10 @@ void pcc_update(void *data, obs_data_t *settings)
 	parsed.match_full_path = obs_data_get_bool(settings, "match_full_path");
 	parsed.cursor = obs_data_get_bool(settings, "cursor");
 	parsed.pause_when_hidden = obs_data_get_bool(settings, "pause_when_hidden");
+	parsed.scaled_layout = obs_data_get_bool(settings, "scaled_layout");
+	parsed.shrink_oversized = obs_data_get_bool(settings, "shrink_oversized");
+	parsed.target_width = (int)obs_data_get_int(settings, "target_width");
+	parsed.target_height = (int)obs_data_get_int(settings, "target_height");
 
 	obs_data_array_t *list = obs_data_get_array(settings, "process_list");
 	if (list) {
@@ -168,10 +187,39 @@ void pcc_tick(void *data, float seconds)
 	if (changed || s->monitor_check_elapsed >= MONITOR_RECHECK_SECONDS) {
 		s->monitor_check_elapsed = 0.0f;
 		s->monitor_valid = find_monitor_by_id(settings.monitor_id, s->monitor);
+
+		s->scaled_layout = settings.scaled_layout;
+		s->shrink_oversized = settings.shrink_oversized;
+
 		if (s->monitor_valid) {
-			s->width = (uint32_t)(s->monitor.rect.right - s->monitor.rect.left);
-			s->height = (uint32_t)(s->monitor.rect.bottom - s->monitor.rect.top);
+			const uint32_t mon_w = (uint32_t)(s->monitor.rect.right - s->monitor.rect.left);
+			const uint32_t mon_h = (uint32_t)(s->monitor.rect.bottom - s->monitor.rect.top);
+
+			/* In scaled mode the source is the target canvas size (manual
+			 * override, else the OBS base canvas); otherwise it is the
+			 * monitor size and the render maps 1:1. */
+			uint32_t target_w = mon_w;
+			uint32_t target_h = mon_h;
+			if (settings.scaled_layout) {
+				obs_video_info ovi;
+				const bool have_ovi = obs_get_video_info(&ovi);
+				target_w = settings.target_width > 0 ? (uint32_t)settings.target_width
+								     : (have_ovi ? ovi.base_width : mon_w);
+				target_h = settings.target_height > 0 ? (uint32_t)settings.target_height
+								      : (have_ovi ? ovi.base_height : mon_h);
+				if (target_w == 0)
+					target_w = mon_w;
+				if (target_h == 0)
+					target_h = mon_h;
+			}
+
+			s->target_w = target_w;
+			s->target_h = target_h;
+			s->width = target_w;
+			s->height = target_h;
 		} else {
+			s->target_w = 0;
+			s->target_h = 0;
 			s->width = 0;
 			s->height = 0;
 		}
@@ -264,8 +312,14 @@ void pcc_render(void *data, gs_effect_t *)
 		return;
 
 	const RECT &mon = s->monitor.rect;
-	const long mon_width = mon.right - mon.left;
-	const long mon_height = mon.bottom - mon.top;
+	const double desktop_w = (double)(mon.right - mon.left);
+	const double desktop_h = (double)(mon.bottom - mon.top);
+	/* Target space the windows are mapped into. Equals the desktop size when
+	 * scaled mode is off, so the mapping below is an exact 1:1 identity. */
+	const double target_w = s->target_w ? (double)s->target_w : desktop_w;
+	const double target_h = s->target_h ? (double)s->target_h : desktop_h;
+	const bool scaled = s->scaled_layout;
+	const bool shrink = s->shrink_oversized;
 
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	gs_eparam_t *image = gs_effect_get_param_by_name(effect, "image");
@@ -294,40 +348,72 @@ void pcc_render(void *data, gs_effect_t *)
 		 * WGC frame) include but DWM's visible frame does not. */
 		const long crop_x = std::max(0L, vr.left - wr.left);
 		const long crop_y = std::max(0L, vr.top - wr.top);
-		const long visible_width = vr.right - vr.left;
-		const long visible_height = vr.bottom - vr.top;
+		const double win_w = (double)(vr.right - vr.left);
+		const double win_h = (double)(vr.bottom - vr.top);
+		const double win_x = (double)(vr.left - mon.left);
+		const double win_y = (double)(vr.top - mon.top);
 
-		long dst_x = vr.left - mon.left;
-		long dst_y = vr.top - mon.top;
+		/* Pixel scale applied to this window and its top-left position in
+		 * target space. Default mode is the identity (scale 1, target ==
+		 * desktop) so dst == win position, matching the original 1:1 path. */
+		double scale = 1.0;
+		double dst_x = win_x;
+		double dst_y = win_y;
+		if (scaled) {
+			/* In shrink mode, windows larger than the target shrink
+			 * (aspect-preserved) just enough to fit; in clip mode they
+			 * keep native size and overflow is cut by the edge clipping. */
+			if (shrink) {
+				if (win_w > target_w)
+					scale = std::min(scale, target_w / win_w);
+				if (win_h > target_h)
+					scale = std::min(scale, target_h / win_h);
+			}
+			const double drawn_w = win_w * scale;
+			const double drawn_h = win_h * scale;
+			/* Map the window's desktop travel range onto the target's, so
+			 * a window at a desktop edge lands at the matching target edge
+			 * while keeping its (possibly shrunk) pixel size. */
+			dst_x = desktop_w > win_w ? win_x * (target_w - drawn_w) / (desktop_w - win_w)
+						  : (target_w - drawn_w) * 0.5;
+			dst_y = desktop_h > win_h ? win_y * (target_h - drawn_h) / (desktop_h - win_h)
+						  : (target_h - drawn_h) * 0.5;
+		}
+		const double drawn_w = win_w * scale;
+		const double drawn_h = win_h * scale;
 
-		/* Clip to the monitor canvas. */
-		const long clip_left = std::max(0L, -dst_x);
-		const long clip_top = std::max(0L, -dst_y);
-		const long clip_right = std::max(0L, dst_x + visible_width - mon_width);
-		const long clip_bottom = std::max(0L, dst_y + visible_height - mon_height);
+		/* Clip to the target canvas (in target space). */
+		const double clip_left = std::max(0.0, -dst_x);
+		const double clip_top = std::max(0.0, -dst_y);
+		const double clip_right = std::max(0.0, dst_x + drawn_w - target_w);
+		const double clip_bottom = std::max(0.0, dst_y + drawn_h - target_h);
 
-		long sub_x = crop_x + clip_left;
-		long sub_y = crop_y + clip_top;
-		long sub_width = visible_width - clip_left - clip_right;
-		long sub_height = visible_height - clip_top - clip_bottom;
+		/* Convert the clipped extents back into texture (source) pixels. */
+		const double inv_scale = 1.0 / scale;
+		double sub_x = (double)crop_x + clip_left * inv_scale;
+		double sub_y = (double)crop_y + clip_top * inv_scale;
+		double sub_width = win_w - (clip_left + clip_right) * inv_scale;
+		double sub_height = win_h - (clip_top + clip_bottom) * inv_scale;
 
 		/* The texture may lag one frame behind the window rect during
 		 * live resizes; clamp so we never sample outside it. */
-		const long texture_width = (long)gs_texture_get_width(texture);
-		const long texture_height = (long)gs_texture_get_height(texture);
+		const double texture_width = (double)gs_texture_get_width(texture);
+		const double texture_height = (double)gs_texture_get_height(texture);
 		if (sub_x >= texture_width || sub_y >= texture_height)
 			continue;
 		sub_width = std::min(sub_width, texture_width - sub_x);
 		sub_height = std::min(sub_height, texture_height - sub_y);
-		if (sub_width <= 0 || sub_height <= 0)
+		if (sub_width <= 0.0 || sub_height <= 0.0)
 			continue;
 
 		gs_effect_set_texture_srgb(image, texture);
 		while (gs_effect_loop(effect, "Draw")) {
 			gs_matrix_push();
 			gs_matrix_translate3f((float)(dst_x + clip_left), (float)(dst_y + clip_top), 0.0f);
-			gs_draw_sprite_subregion(texture, 0, (uint32_t)sub_x, (uint32_t)sub_y, (uint32_t)sub_width,
-						 (uint32_t)sub_height);
+			if (scale != 1.0)
+				gs_matrix_scale3f((float)scale, (float)scale, 1.0f);
+			gs_draw_sprite_subregion(texture, 0, (uint32_t)llround(sub_x), (uint32_t)llround(sub_y),
+						 (uint32_t)llround(sub_width), (uint32_t)llround(sub_height));
 			gs_matrix_pop();
 		}
 	}
@@ -382,6 +468,10 @@ void pcc_get_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "match_full_path", false);
 	obs_data_set_default_bool(settings, "pause_when_hidden", true);
 	obs_data_set_default_string(settings, "monitor", "");
+	obs_data_set_default_bool(settings, "scaled_layout", false);
+	obs_data_set_default_bool(settings, "shrink_oversized", true);
+	obs_data_set_default_int(settings, "target_width", 0);
+	obs_data_set_default_int(settings, "target_height", 0);
 }
 
 bool add_process_modified(obs_properties_t *, obs_property_t *, obs_data_t *settings)
@@ -416,7 +506,17 @@ bool add_process_modified(obs_properties_t *, obs_property_t *, obs_data_t *sett
 	return true;
 }
 
-obs_properties_t *pcc_get_properties(void *)
+/* Show the scaled-layout sub-options only while the mode is enabled. */
+bool scaled_layout_modified(obs_properties_t *props, obs_property_t *, obs_data_t *settings)
+{
+	const bool scaled = obs_data_get_bool(settings, "scaled_layout");
+	obs_property_set_visible(obs_properties_get(props, "shrink_oversized"), scaled);
+	obs_property_set_visible(obs_properties_get(props, "target_width"), scaled);
+	obs_property_set_visible(obs_properties_get(props, "target_height"), scaled);
+	return true;
+}
+
+obs_properties_t *pcc_get_properties(void *data)
 {
 	obs_properties_t *props = obs_properties_create();
 
@@ -445,6 +545,25 @@ obs_properties_t *pcc_get_properties(void *)
 	obs_properties_add_bool(props, "match_full_path", obs_module_text("MatchFullPath"));
 	obs_properties_add_bool(props, "cursor", obs_module_text("CaptureCursor"));
 	obs_properties_add_bool(props, "pause_when_hidden", obs_module_text("PauseWhenHidden"));
+
+	obs_property_t *scaled = obs_properties_add_bool(props, "scaled_layout", obs_module_text("ScaledLayout"));
+	obs_property_set_long_description(scaled, obs_module_text("ScaledLayout.Tooltip"));
+	obs_property_set_modified_callback(scaled, scaled_layout_modified);
+
+	obs_properties_add_bool(props, "shrink_oversized", obs_module_text("ShrinkOversized"));
+	obs_properties_add_int(props, "target_width", obs_module_text("TargetWidth"), 0, 16384, 1);
+	obs_properties_add_int(props, "target_height", obs_module_text("TargetHeight"), 0, 16384, 1);
+
+	/* Match the sub-options' initial visibility to the saved setting. */
+	obs_property_set_visible(obs_properties_get(props, "shrink_oversized"), false);
+	obs_property_set_visible(obs_properties_get(props, "target_width"), false);
+	obs_property_set_visible(obs_properties_get(props, "target_height"), false);
+	if (data) {
+		auto *s = static_cast<CompositeSource *>(data);
+		obs_data_t *settings = obs_source_get_settings(s->source);
+		scaled_layout_modified(props, scaled, settings);
+		obs_data_release(settings);
+	}
 
 	return props;
 }
